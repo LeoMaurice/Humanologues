@@ -6,12 +6,11 @@ library(Factoshiny)
 # Étape 1 : Pivot Wider
 prepare_pca_data <- function(df) {
   df_wide <- df %>%
-    select(document,term,count)%>%
-    pivot_wider(names_from = term, values_from = count, values_fill = 0, names_prefix = "freq_")  # Mettre à 0 les valeurs manquantes
-  df_wide%>%
-    left_join(df%>%
-                select(document,Nom,Source,Date),
-              by = "document")
+    select(Nom,term,count)%>%
+    pivot_wider(names_from = term, values_from = count, values_fill = 0, names_prefix = "freq_") %>%
+    as.data.frame() # Mettre à 0 les valeurs manquantes
+  
+  rownames(df_wide) <- df_wide$Nom
   return(df_wide)
 }
 

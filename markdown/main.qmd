@@ -14,6 +14,8 @@ recompute = T
 ```
 ```{r}
 
+complotistes <- c("Casasnovas","Chaumont","Crèvecoeur","Fourtillan","Joyeux","Krusi","Laïbi", "Mucchielli","Rader","Rivasi","Schaller","Trotta","Wonner")
+
 # remove_auteur_particulier = c("Méda","Heyer","CantoSperber","Illouz","Ccne","Morin")
 remove_auteur_particulier = c()
 
@@ -21,7 +23,10 @@ humanologues_base <- read_pdfs_from_folder("./data/raw/textes")%>%
   mutate(Nom = str_extract(file_name, "^[^_]+"),
          Source = str_extract(file_name, "(?<=_)[^_]+(?=_)"),
          Date = as.Date(str_extract(file_name, "\\d{8}(?=\\.pdf)"), format = "%Y%m%d"))%>%
-  filter(!Nom%in%remove_auteur_particulier)
+  filter(!Nom%in%remove_auteur_particulier)%>%
+  mutate(supp = Nom %in% complotistes)%>%
+  arrange(supp,Nom)%>%
+  mutate(doc_id = as.character(str_pad(row_number(), width = 2, pad = "0")))
 
 toremove_didier_boltanski <- readxl::read_xlsx("./data/intermediate/frequence_mots_retenus.xlsx")%>%
   filter(ejected == "&")%>%pull(feature)
@@ -45,13 +50,152 @@ dfm_humanologues%>%
 
 ```{r}
 base_word_humanologues <- tidy_dfm_with_docvars(dfm_humanologues)
+
+base_word_humanologues <- base_word_humanologues%>%
+  mutate(supp = Nom %in% complotistes)%>%
+  as.data.frame()
+
+output_pca <- perform_pca_pipeline(base_word_humanologues, supplementaires = complotistes, robust = T)
+
+pca_res_humanologues <- output_pca$pca_res
+projected_data <- output_pca$projected_data
+
+projected_data <- projected_data%>%
+  left_join(humanologues_base%>%select(-text, -file_name),
+            by = "Nom")
+
+rownames(projected_data) <- projected_data$Nom
 ```
+# clustering
+
 ```{r}
-pca_res_humanologues <- perform_pca_pipeline(base_word_humanologues, robust = T)
+library(cluster)
+base_c <- base_word_humanologues %>%
+  select(Nom, term, count)%>%
+  pivot_wider(names_from = term, values_from = count, names_prefix = "term.")%>%
+  mutate(across(starts_with("term."), ~ifelse(is.na(.x), 0, .x)))%>%
+  mutate(across(starts_with("term."), scale)) %>%
+  arrange(Nom)
+
+base_c <- as.data.frame(base_c)
+rownames(base_c) <- base_c$Nom
+
+cluster_data <- scale(projected_data%>%filter(!supp)%>%select(starts_with("PC")))
+supp_data <- scale(projected_data%>%filter(supp)%>%select(starts_with("PC")))
+# cluster_data <- scale(base_c%>%filter(!Nom %in% complotistes)%>%select(starts_with("term.")))
+# supp_data <- scale(base_c%>%filter(Nom %in% complotistes)%>%select(starts_with("term.")))
+
+# hierariachal
+dist_matrix <- dist(cluster_data, method = "manhattan")
+hc_result <- hclust(dist_matrix, method = "ward.D2")
+plot(hc_result)  # Visualize dendrogram
+
+clusters <- cutree(hc_result, k = 6)  # Cut dendrogram into 3 clusters
+# kmeans
+
+set.seed(123)  # For reproducibility
+kmeans_result <- kmeans(cluster_data, centers = 4)
+clusters = kmeans_result$cluster
+
+# pam
+
+kmedoids_result <- pam(cluster_data, k = 3, metric = "euclidean")  # k = nombre de clusters
+clusters = kmedoids_result$cluster
+distances <- dist(rbind(supp_data, kmedoids_result$medoids), method = "euclidean")
+distances_to_medoids  <- as.matrix(distances)[rownames(supp_data), rownames(kmedoids_result$medoids)]
+new_clusters <- apply(distances_to_medoids, 1, which.min)
+
+clusters <- c(clusters, new_clusters)
+
+projected_data_cluster <- projected_data%>%
+  mutate(cluster = as.factor(clusters[Nom]))%>%
+  mutate(medoids = Nom %in% rownames(kmedoids_result$medoids))
+```
+# plots
+
+```{r}
+get_eigenvalues <- function(pca_res) {
+  if ("PCA" %in% class(pca_res)) {
+    eig <- pca_res$eig
+  } else if (is.rrcovPca(pca_res)) {
+    eig <- pca_res@eigenvalues
+  } else {
+    stop(paste("Unsupported PCA object of class", class(pca_res)))
+  }
+  return(eig)
+}
+
+plot_pca <- function(projected_data, pca_res, dims = c(1, 2)) {
+  x_var <- paste0("PC", dims[1])
+  y_var <- paste0("PC", dims[2])
+  
+  # Calculate percentage of variance explained
+  eig <- get_eigenvalues(pca_res)
+  if ("PCA" %in% class(pca_res)) {
+    perc_var <- eig[, 2]
+  } else if (is.rrcovPca(pca_res)) {
+    perc_var <- eig / sum(eig) * 100
+  }
+  
+  PCA_plot <- ggplot(projected_data,
+                     aes(
+                       x = !!sym(x_var),
+                       y = !!sym(y_var),
+                       shape = supp,
+                       color = cluster,
+                       label = Nom
+                     )) +
+    geom_point(size = 3, alpha = 0.8) +
+    geom_text_repel(box.padding = 0.5,
+                    # Espace autour des labels
+                    max.overlaps = Inf,
+                    # Nombre maximal de chevauchements autorisés
+                    seed = 123,          # Pour la reproductibilité
+                    show.legend = FALSE,
+                    size = 6.5
+                  ) +
+    # geom_circle(
+    #   data = projected_data%>%
+    #     filter(medoids),
+    #   aes(x0 = !!sym(x_var),
+    #       y0 = !!sym(y_var),
+    #       r = 0.5, color = cluster),
+    #   fill = NA,
+    #   alpha = 0.5
+    # ) +
+    labs(
+      title = paste("Projection sur les axes PCA", dims[1], "et", dims[2]),
+      x = paste0("PCA ", dims[1], " (", round(perc_var[dims[1]], 1), "%)"),
+      y = paste0("PCA ", dims[2], " (", round(perc_var[dims[2]], 1), "%)")
+    ) +
+      
+      theme_pubclean() +
+      theme(
+        text = element_text(family = "sans", size = 16),
+        axis.text = element_text(size = 16),
+        
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20, face = "bold"),
+        title = element_text(size = 26, face = "bold"),
+        legend.position = "top"
+      ) +
+    grids("xy", linetype = "dotted", color = "grey") +
+    scale_shape(name = "Supplémentaire ?",
+                labels = c("Non", "Oui")) +
+      scale_colour_prism(name = "Cluster",
+                         palette = "colorblind_safe")
+    
+    PCA_plot
+}
 ```
 
 ```{r}
-plots <- pca_visualization(pca_res_humanologues, humanologues_base%>%select(Nom, doc_id)%>%rename(document = doc_id))
+plot_pca(projected_data = projected_data_cluster, pca_res = pca_res_humanologues, dims = c(1,2))
+```
+
+# plot 
+```{r}
+plots <- pca_visualization(pca_res_humanologues, humanologues_base%>%select(Nom, doc_id)%>%rename(document = doc_id), projected_data = projected_data)
 ```
 # Plots
 
@@ -94,7 +238,17 @@ ggsave(
 
 ## Variance expliquée
 ```{r}
-plots$variance
+plots$variance+
+   theme_pubclean() +
+      theme(
+        text = element_text(family = "sans", size = 16),
+        axis.text = element_text(size = 16),
+        
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20, face = "bold"),
+        title = element_text(size = 26, face = "bold"),
+        legend.position = "top"
+      )
 
 ggsave(
   filename = "temp/variance_expliquee.png",   # Nom du fichier
@@ -107,7 +261,17 @@ ggsave(
 
 ## Top var contributrice
 ```{r}
-plots$top_vars_dim1
+plots$top_vars_dim1 +
+   theme_pubclean() +
+      theme(
+        text = element_text(family = "sans", size = 16),
+        axis.text = element_text(size = 16),
+        
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20, face = "bold"),
+        title = element_text(size = 26, face = "bold"),
+        legend.position = "top"
+      )
 
 ggsave(
   filename = "temp/contributions_dim1.png",   # Nom du fichier

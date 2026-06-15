@@ -5,6 +5,10 @@ library(ggpubr)
 library(dplyr)
 library(tidyr)
 library(rrcov)
+library(dbscan)
+library(cluster)
+library(ggrepel)
+library(ggprism)
 
 is.rrcovPca <- function(pca_res){
   return(
@@ -17,7 +21,7 @@ is.rrcovPca <- function(pca_res){
 }
 
 # Fonction pour les sorties standard
-pca_visualization <- function(pca_res, docmetadatas, log = FALSE) {
+pca_visualization <- function(pca_res, docmetadatas, projected_data, log = FALSE) {
   
   # Helper functions to extract data based on PCA object class
   get_individual_coords <- function(pca_res) {
@@ -67,8 +71,8 @@ pca_visualization <- function(pca_res, docmetadatas, log = FALSE) {
       left_join(docmetadatas,
                 by = "document")
     
-    x_var <- paste0("Dim", dims[1])
-    y_var <- paste0("Dim", dims[2])
+    x_var <- paste0("PC", dims[1])
+    y_var <- paste0("PC", dims[2])
     
     # Calculate percentage of variance explained
     eig <- get_eigenvalues(pca_res)
@@ -78,16 +82,30 @@ pca_visualization <- function(pca_res, docmetadatas, log = FALSE) {
       perc_var <- eig / sum(eig) * 100
     }
     
-    PCA_plot <- ggplot(ind_data, aes_string(x = x_var, y = y_var, color = "Nom")) +
+    PCA_plot <- ggplot(projected_data, aes_string(x = x_var, y = y_var, color = "supp", label = "Nom")) +
       geom_point(size = 3, alpha = 0.8) +
-      geom_text(aes(label = Nom), vjust = -0.5, size = 3) +
+      geom_text_repel(
+        box.padding = 0.5,  # Espace autour des labels
+        max.overlaps = Inf, # Nombre maximal de chevauchements autorisés
+        seed = 123          # Pour la reproductibilité
+      ) +
+      # geom_text(aes(label = Nom), vjust = -0.5, size = 5) +
       labs(
         title = paste("Projection sur les axes PCA", dims[1], "et", dims[2]),
         x = paste0("PCA ", dims[1], " (", round(perc_var[dims[1]], 1), "%)"),
         y = paste0("PCA ", dims[2], " (", round(perc_var[dims[2]], 1), "%)")
       ) +
+      
       theme_pubclean() +
-      theme(legend.position = "none")
+      theme(axis.text = element_text(size = 12),
+            legend.text = element_text(20),
+            axis.title = element_text(size = 20, face = "bold"),
+            title = element_text(size = 26, face = "bold")) +
+      scale_colour_prism(
+        name = "Supplémentaire ?",
+        palette = "colorblind_safe", 
+        labels = c("Non", "Oui")
+      )
     
     if (log) {
       PCA_plot <- PCA_plot +
@@ -227,6 +245,121 @@ pca_visualization <- function(pca_res, docmetadatas, log = FALSE) {
       theme_pubclean()
   }
   
+  plot_cluster <-  function(pca_res, docmetadatas) {
+    # Helper functions to extract data based on PCA object class
+    get_individual_coords <- function(pca_res) {
+      if ("PCA" %in% class(pca_res)) {
+        # FactoMineR PCA object
+        ind_coords <- pca_res$ind$coord
+      } else if (is.rrcovPca(pca_res)) {
+        # rrcov PCA object
+        ind_coords <- pca_res@scores
+      } else {
+        stop(paste("Unsupported PCA object of class", class(pca_res)))
+      }
+      return(ind_coords)
+    }
+    
+    get_variable_coords <- function(pca_res) {
+      if ("PCA" %in% class(pca_res)) {
+        var_coords <- pca_res$var$coord
+      } else if (is.rrcovPca(pca_res)) {
+        var_coords <- pca_res@loadings
+      } else {
+        stop(paste("Unsupported PCA object of class", class(pca_res)))
+      }
+      return(var_coords)
+    }
+    
+    get_eigenvalues <- function(pca_res) {
+      if ("PCA" %in% class(pca_res)) {
+        eig <- pca_res$eig
+      } else if (is.rrcovPca(pca_res)) {
+        eig <- pca_res@eigenvalues
+      } else {
+        stop(paste("Unsupported PCA object of class", class(pca_res)))
+      }
+      return(eig)
+    }
+    
+    ind_coords <- get_individual_coords(pca_res)
+    
+    dims = c(1,2,3)
+    
+    ind_data <- as.data.frame(ind_coords[, dims]) %>%
+      rename_with(~ paste0("Dim", dims), everything()) 
+    
+    ind_data$document <- row.names(ind_data)
+    
+    ind_data <- ind_data%>%
+      left_join(docmetadatas,
+                by = "document")
+    cah <- hclust(dist(ind_coords), method = "ward.D2")
+    clusters <- cutree(cah, k = 4)
+    
+    ind_data$cluster <- as.factor(clusters)
+    
+    print(clusters)
+    
+    x_var <- "Dim1"
+    y_var <- "Dim2"
+    
+    # Calculate percentage of variance explained
+    eig <- get_eigenvalues(pca_res)
+    if ("PCA" %in% class(pca_res)) {
+      perc_var <- eig[, 2]
+    } else if (is.rrcovPca(pca_res)) {
+      perc_var <- eig / sum(eig) * 100
+    }
+    
+    PCA_plot12 <- ggplot(ind_data, aes_string(x = x_var, y = y_var, color = "cluster")) +
+      geom_point(size = 3, alpha = 0.8) +
+      geom_text(aes(label = Nom), vjust = -0.5, size = 5) +
+      labs(
+        title = paste("Projection sur les axes PCA", dims[1], "et", dims[2]),
+        x = paste0("PCA ", dims[1], " (", round(perc_var[dims[1]], 1), "%)"),
+        y = paste0("PCA ", dims[2], " (", round(perc_var[dims[2]], 1), "%)")
+      ) +
+      theme_pubclean() +
+      theme(legend.position = "none",
+            axis.text = element_text(size = 12),
+            axis.title = element_text(size = 20, face = "bold"),
+            title = element_text(size = 26, face = "bold")) 
+    
+    x_var <- "Dim2"
+    y_var <- "Dim3"
+    
+    # Calculate percentage of variance explained
+    eig <- get_eigenvalues(pca_res)
+    if ("PCA" %in% class(pca_res)) {
+      perc_var <- eig[, 2]
+    } else if (is.rrcovPca(pca_res)) {
+      perc_var <- eig / sum(eig) * 100
+    }
+    
+    PCA_plot23 <- ggplot(ind_data, aes_string(x = x_var, y = y_var, color = "cluster")) +
+      geom_point(size = 3, alpha = 0.8) +
+      geom_text(aes(label = Nom), vjust = -0.5, size = 5) +
+      labs(
+        title = paste("Projection sur les axes PCA", dims[1], "et", dims[2]),
+        x = paste0("PCA ", dims[1], " (", round(perc_var[dims[1]], 1), "%)"),
+        y = paste0("PCA ", dims[2], " (", round(perc_var[dims[2]], 1), "%)")
+      ) +
+      theme_pubclean() +
+      theme(legend.position = "none",
+            axis.text = element_text(size = 12),
+            axis.title = element_text(size = 20, face = "bold"),
+            title = element_text(size = 26, face = "bold")) 
+    return(
+      list(
+        dims12 = PCA_plot12,
+        dims12 = PCA_plot23
+      )
+    )
+  }
+  
+  plots_cluster <- plot_cluster(pca_res, docmetadatas)
+  
   # Génération des graphiques
   plots <- list(
     proj_1_2 = proj_individuals(pca_res, docmetadatas, dims = c(1, 2)),
@@ -238,7 +371,9 @@ pca_visualization <- function(pca_res, docmetadatas, log = FALSE) {
     variance = plot_variance(pca_res),
     top_vars_dim1 = plot_cutoff_variables(pca_res, dim = 1,cut_off = 0.1),
     top_vars_dim2 = plot_cutoff_variables(pca_res, dim = 2,cut_off = 0.1),
-    top_vars_dim3 = plot_cutoff_variables(pca_res, dim = 3,cut_off = 0.1)
+    top_vars_dim3 = plot_cutoff_variables(pca_res, dim = 3,cut_off = 0.1),
+    cluster12 = plots_cluster$dims12,
+    cluster23 = plots_cluster$dims23
   )
   
   return(plots)
